@@ -1,0 +1,214 @@
+// Collision detection related stuff -------------------------------------
+int
+	MSVehicle::detectCollision(std::string otherCarID, int timeSteps) {
+
+		MSVehicle* vA = this;
+		MSVehicle* vB = dynamic_cast<MSVehicle*>(MSNet::getInstance()->getVehicleControl().getVehicle(otherCarID));
+
+		if (timeSteps < 0) {
+			return timeSteps;
+		}
+
+		if(!vA->hasDeparted() || !vB->hasDeparted()) {
+			return timeSteps;
+		}
+
+		// On the same lane, ignore collision detection
+		// If on opposite lanes of the same road, also ignore collision detection
+		double angleDiff = abs(vA->getAngle() - vB->getAngle());
+		if(angleDiff == 0 || angleDiff == 180) {
+			return timeSteps;
+		}
+
+		// TODO: Position could be start, middle, or end of car. Need to find out which (assuming start of car)
+		std::vector < std::vector < double > > positionsA, positionsB;
+		std::vector < MSLane* > lanesA, lanesB;
+
+		if(timeSteps > 0) {
+			positionsA = vA->getFuturePositions();
+			positionsB = vB->getFuturePositions();
+			lanesA = vA->getFutureLanes();
+			lanesB = vB->getFutureLanes();
+		} else {
+			positionsA = vA->getPastPositions();
+			positionsB = vB->getPastPositions();
+			lanesA = vA->getPastLanes();
+			lanesB = vB->getPastLanes();
+		}
+		//vA->predictFuturePositions(timeSteps, positionsA, lanesA);
+		//vB->predictFuturePositions(timeSteps, positionsB, lanesB);
+
+		// Make "positionsA" the smaller vector,
+		// so that the loop later makes sense
+		std::string a = vA->getID();
+		std::string b = vB->getID();
+		if(positionsA.size() > positionsB.size()) {
+			positionsA.swap(positionsB);
+			lanesA.swap(lanesB);
+			std::string t = a;
+			a = b;
+			b = t;
+		}
+
+		int timeAtCollision = timeSteps;
+
+		unsigned int l = 0;
+		for(unsigned int i = 0; i < positionsA.size(); i++) {
+
+			// Need to make sure that we compare positions which correspond to the ACTUAL
+			// time are compared. For this we need to check whether the fractions of the total time are about the same
+			double aFract = ((double)(i+1)/(double)positionsA.size());
+			std::vector < double > cornersA = vA->getCornerPoints(positionsA[i]);
+
+			for(; l < positionsB.size(); l++) {
+				double bFract = ((double)(l+1)/(double)positionsB.size());
+
+				/*if(timeSteps == 0 && (positionsA.size() > 2 || positionsB.size() > 2)) {
+					std::stringstream ss;
+					ss << "Checking for " << a << ": " << positionsA[i][0] << ", " << positionsA[i][1];
+					ss << " against " << b << ": " << positionsB[l][0] << ", " << positionsB[l][1];
+					WRITE_WARNING(ss.str());
+				}*/
+
+				double distance = sqrt(pow(positionsA[i][0] - positionsB[l][0],2) + pow(positionsA[i][1] - positionsB[l][1],2));
+
+				if(distance > 15) {
+					if(bFract >= aFract) break;
+					else continue;
+				}
+
+				// Get corner points
+				std::vector < double > cornersB = vB->getCornerPoints(positionsB[l]);
+
+				bool collidingA = true;
+				for(unsigned int j = 2; j < cornersA.size()+2; j+=2) {
+					//   edge = v(n) - v(n-1)
+					// rotated.x = -unrotated.y
+					// rotated.y =  unrotated.x
+
+					/*
+					rotated: your rotated edge
+					v(n-1) any point from the edge.
+					testpoint: the point you want to find out which side it's on.   
+					side = sign (rotated.x * (testpoint.x - v(n-1).x) + rotated.y * (testpoint.y - v(n-1).y);
+					*/
+
+					double edgeX, edgeY;
+					if(j >= cornersA.size()) {
+						edgeX = cornersA[j-2] - cornersA[0];
+						edgeY = cornersA[j-1] - cornersA[1];
+					} else {
+						edgeX = cornersA[j] - cornersA[j-2];
+						edgeY = cornersA[j+1] - cornersA[j-1];
+					}
+
+					double rotatedEdgeX = -edgeY;
+					double rotatedEdgeY = edgeX;
+
+					// Normalize edge
+					double edgeLength = sqrt(rotatedEdgeX * rotatedEdgeX + rotatedEdgeY * rotatedEdgeY);
+					rotatedEdgeX /= edgeLength;
+					rotatedEdgeY /= edgeLength;
+
+					//Carve out the min and max values
+					double c1_min = DBL_MAX, c1_max = -DBL_MAX;
+					double c2_min = DBL_MAX, c2_max = -DBL_MAX;
+
+					//Project every point in cornersA on the axis and store min and max
+					for(unsigned int k = 0; k < cornersA.size(); k+=2)
+					{
+						double c1_proj = (rotatedEdgeX * cornersA[k] + rotatedEdgeY * cornersA[k+1]) / (rotatedEdgeX * rotatedEdgeX + rotatedEdgeY * rotatedEdgeY);
+						c1_min = std::min(c1_proj, c1_min);
+						c1_max = std::max(c1_proj, c1_max);
+					}
+
+					//Project every point in cornersB on the axis and store min and max
+					for(unsigned int k = 0; k < cornersB.size(); k+=2)
+					{
+						double c2_proj = (rotatedEdgeX * cornersB[k] + rotatedEdgeY * cornersB[k+1]) / (rotatedEdgeX * rotatedEdgeX + rotatedEdgeY * rotatedEdgeY);
+						c2_min = std::min(c2_proj, c2_min);
+						c2_max = std::max(c2_proj, c2_max);
+					}
+
+					//If there is one projection that does not overlap, no collision exists for this point
+					if(!(c1_max >= c2_min && c1_min <= c2_max)) {
+						collidingA = false;
+						break;
+					}
+				}
+
+				// Found the earliest collision
+				if(collidingA) {
+					// Checking for collision at current time
+					if(timeSteps == 0) {
+						timeAtCollision = -1;
+					} else {
+						// Checking for collision in the future
+						timeAtCollision = (int)(((double)i/(double)positionsA.size()) * (double)timeSteps);
+						nearestIntersecting = vB;
+					}
+					return timeAtCollision;
+				}
+				if(bFract >= aFract) break;
+			}
+		}
+
+		return timeAtCollision;
+}
+
+std::vector < double >
+	MSVehicle::getCornerPoints(std::vector <double> coordinates) {
+		double length = this->getVehicleType().getLength();
+		double width = this->getVehicleType().getWidth();
+		double angle = this->getAngle();
+
+		std::vector < double > out;
+		out.push_back(coordinates[0]-(width/2.0)-0.5);
+		out.push_back(coordinates[1]);
+		out.push_back(coordinates[0]+(width/2.0)+0.5);
+		out.push_back(coordinates[1]);
+		out.push_back(coordinates[0]+(width/2.0)+0.5);
+		out.push_back(coordinates[1]-length-0.5);
+		out.push_back(coordinates[0]-(width/2.0)-0.5);
+		out.push_back(coordinates[1]-length-0.5);
+
+		rotateCornerPoints(out,angle);
+
+		return out;
+}
+
+void
+	MSVehicle::rotateCornerPoints(std::vector <double>& points, double angle) {
+
+		// Get centroid
+		double cX = 0, cY = 0;
+		for(unsigned int i = 0; i < points.size(); i+=2) {
+			cX += points[i];
+			cY += points[i+1];
+		}
+		cX /= 4.0;
+		cY /= 4.0;
+
+		for(unsigned int i = 0; i < points.size(); i+=2) {
+			// Subtract x of point to rotate around
+			points[i] -= cX;
+			// Subtract y of point to rotate around
+			points[i+1] -= cY;
+		}
+
+		// Rotation
+		// x' = x \cos \theta - y \sin \theta
+		// y' = x \sin \theta + y \cos \theta
+		double angleInRad =	angle * M_PI / 180.0;
+		for(unsigned int i = 0; i < points.size(); i+=2) {
+			double xDash = points[i] * cos(angleInRad) - points[i+1] * sin(angleInRad);
+			double yDash = points[i] * sin(angleInRad) + points[i+1] * cos(angleInRad);
+			points[i] = xDash;
+			points[i+1] = yDash;
+		}
+
+		for(unsigned int i = 0; i < points.size(); i+=2) {
+			points[i] += cX;
+			points[i+1] += cY;
+		}
+}
